@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Living World</title>
+<style>
+  :root { --bg:#f6f3ee; --fg:#1f1d1a; --muted:#6b655c; --card:#fff; --line:#ddd5c8; --accent:#7a4b1f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#16140f; --fg:#ece6dc; --muted:#a39a8c; --card:#211e18; --line:#3a352c; --accent:#e0a66a; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; margin-right:auto; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; }
+  h2 { font-size:16px; margin:0 0 8px; }
+  form { display:flex; flex-wrap:wrap; gap:8px; align-items:end; margin:8px 0; }
+  label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); }
+  input, select, textarea, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--fg); }
+  textarea { width:100%; min-height:80px; }
+  button { background:var(--accent); color:var(--card); border:none; cursor:pointer; }
+  button.link { background:none; color:var(--accent); padding:0; text-decoration:underline; }
+  .row { display:grid; grid-template-columns: minmax(0,3fr) minmax(0,2fr); gap:16px; }
+  @media (max-width: 760px) { .row { grid-template-columns: 1fr; } }
+  .crumbs { display:flex; gap:6px; flex-wrap:wrap; color:var(--muted); }
+  svg.map { width:100%; aspect-ratio:4/3; background:var(--bg); border:1px solid var(--line); border-radius:6px; }
+  .pin circle { fill:var(--accent); cursor:pointer; } .pin text { fill:var(--fg); font-size:3px; }
+  .muted { color:var(--muted); font-size:13px; } .err { color:#c0392b; min-height:1.5em; }
+  ul { padding-left:18px; margin:4px 0; }
+</style>
+</head>
+<body>
+<header><h1>Living World</h1><span id="who" class="muted"></span></header>
+<main id="app"></main>
+<p id="err" class="err" role="alert" style="padding:0 16px"></p>
+<script>
+const $app = document.getElementById('app');
+let token = localStorage.getItem('lw-token');
+const state = { world: null, loc: null, pick: null };
+
+// Build DOM with textContent only, so user-entered names never become HTML.
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElementNS(tag === 'svg' || attrs.svg ? 'http://www.w3.org/2000/svg' : 'http://www.w3.org/1999/xhtml', tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'svg') continue;
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v); else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) el.append(k.nodeType ? k : String(k));
+  return el;
+}
+const field = (label, input) => h('label', {}, label, input);
+const options = (list, sel) => list.map((v) => h('option', { value: v, selected: v === sel || false }, v));
+
+async function api(method, url, body) {
+  const res = await fetch(url, { method, headers: { 'content-type': 'application/json', ...(token && { authorization: 'Bearer ' + token }) }, body: body && JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw Object.assign(new Error(data.error), { status: res.status });
+  return data;
+}
+async function run(fn) {
+  document.getElementById('err').textContent = '';
+  try { await fn(); } catch (e) { document.getElementById('err').textContent = e.message; if (e.status === 401) { token = null; localStorage.removeItem('lw-token'); render(); } }
+}
+function onSubmit(fn) { return (e) => { e.preventDefault(); const f = Object.fromEntries(new FormData(e.target)); run(() => fn(f, e.target)); }; }
+
+let renders = 0;
+async function render() {
+  const n = ++renders;
+  $app.replaceChildren();
+  if (!token) {
+    document.getElementById('who').textContent = '';
+    return $app.append(h('section', {}, h('h2', {}, 'Sign in'),
+      h('p', { class: 'muted' }, 'Development sign-in: pick a display name. Your session token is kept in this browser.'),
+      h('form', { onsubmit: onSubmit(async (f) => { const r = await api('POST', '/api/users', f); token = r.token; localStorage.setItem('lw-token', token); render(); }) },
+        field('Name', h('input', { name: 'name', required: true })), h('button', {}, 'Continue'))));
+  }
+  const me = await api('GET', '/api/me');
+  if (n !== renders) return; // a newer render started while we waited
+  document.getElementById('who').textContent = 'Signed in as ' + me.user.name;
+  if (state.world) return renderWorld();
+  $app.append(
+    h('section', {}, h('h2', {}, 'Your worlds'),
+      me.worlds.length ? h('ul', {}, me.worlds.map((w) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => openWorld(w.id)) }, w.name), ` — ${w.role}`))) : h('p', { class: 'muted' }, 'None yet.')),
+    h('section', {}, h('h2', {}, 'Create a world'),
+      h('form', { onsubmit: onSubmit(async (f) => { const w = await api('POST', '/api/worlds', f); await openWorld(w.id); }) },
+        field('Name', h('input', { name: 'name', required: true })),
+        field('Advancement', h('select', { name: 'advancement' }, options(['milestone', 'xp'], 'milestone'))),
+        field('NPC autonomy', h('select', { name: 'npcAutonomy' }, options(['static', 'scheduled', 'reactive', 'simulated', 'ai-assisted'], 'scheduled'))),
+        h('button', {}, 'Create'))),
+    h('section', {}, h('h2', {}, 'Join with an invite code'),
+      h('form', { onsubmit: onSubmit(async (f) => { const r = await api('POST', `/api/invites/${encodeURIComponent(f.code.trim())}/accept`); await openWorld(r.worldId); }) },
+        field('Code', h('input', { name: 'code', required: true })), h('button', {}, 'Join'))));
+}
+
+async function openWorld(id) {
+  state.world = await api('GET', `/api/worlds/${id}`);
+  state.loc = await api('GET', `/api/locations/${state.world.rootLocationId}`);
+  render();
+}
+async function go(locId) { state.loc = await api('GET', `/api/locations/${locId}`); state.pick = null; render(); }
+
+function renderWorld() {
+  const w = state.world, v = state.loc, gm = w.role === 'gm';
+  $app.append(h('section', {},
+    h('div', { class: 'crumbs' }, h('button', { class: 'link', onclick: () => { state.world = null; render(); } }, 'All worlds'), '›', h('strong', {}, w.name), h('span', {}, `(${w.role})`)),
+    h('p', { class: 'muted' }, `Ruleset ${w.settings.ruleset} · default advancement ${w.settings.advancement} · NPC autonomy ${w.settings.npcAutonomy}`),
+    gm ? campaignsPanel(w) : h('p', { class: 'muted' }, 'Campaigns: ' + w.campaigns.map((c) => `${c.name} (${c.advancement.mode})`).join(', '))));
+
+  const pins = v.children.map((c) => h('g', { svg: 1, class: 'pin', tabindex: 0, role: 'button', 'aria-label': `Open ${c.name}`,
+      onclick: () => run(() => go(c.id)), onkeydown: (e) => e.key === 'Enter' && run(() => go(c.id)) },
+    h('circle', { svg: 1, cx: c.x, cy: c.y * 0.75, r: 1.6 }), h('text', { svg: 1, x: c.x + 2.2, y: c.y * 0.75 + 1 }, c.name)));
+  const pick = state.pick && h('circle', { svg: 1, cx: state.pick.x, cy: state.pick.y * 0.75, r: 1.2, fill: 'none', stroke: 'currentColor', 'stroke-width': 0.4 });
+  const svg = h('svg', { class: 'map', viewBox: '0 0 100 75', role: 'img', 'aria-label': v.map.name },
+    v.map.imageUrl && h('image', { svg: 1, href: v.map.imageUrl, x: 0, y: 0, width: 100, height: 75, preserveAspectRatio: 'xMidYMid slice' }), pins, pick);
+  if (gm) svg.addEventListener('click', (e) => {
+    if (e.target.closest('.pin')) return;
+    const r = svg.getBoundingClientRect();
+    state.pick = { x: Math.round(((e.clientX - r.left) / r.width) * 100), y: Math.round(((e.clientY - r.top) / r.height) * 100) };
+    render();
+  });
+
+  $app.append(h('div', { class: 'row' },
+    h('section', {},
+      h('nav', { class: 'crumbs', 'aria-label': 'Breadcrumbs' }, v.breadcrumbs.flatMap((b, i) => [i ? '›' : null, i === v.breadcrumbs.length - 1 ? h('strong', {}, b.name) : h('button', { class: 'link', onclick: () => run(() => go(b.id)) }, b.name)])),
+      h('h2', {}, `${v.location.name} `, h('span', { class: 'muted' }, v.location.type)),
+      svg,
+      v.children.length ? h('ul', {}, v.children.map((c) => h('li', {}, h('button', { class: 'link', onclick: () => run(() => go(c.id)) }, c.name), ` — ${c.type}`, gm ? ` [${c.visibility}]` : ''))) : h('p', { class: 'muted' }, 'No known places here.'),
+      gm && addPlaceForm(v)),
+    h('section', {}, h('h2', {}, v.page.title),
+      gm ? pageEditor(v) : [h('p', { style: 'white-space:pre-wrap' }, v.page.body || '—')])));
+}
+
+function campaignsPanel(w) {
+  return [
+    h('ul', {}, w.campaigns.map((c) => h('li', {}, `${c.name}: ${c.advancement.mode} (from ${c.advancement.source}) `,
+      h('button', { class: 'link', onclick: () => run(async () => {
+        const mode = c.advancement.mode === 'xp' ? 'milestone' : 'xp';
+        try { await api('PATCH', `/api/campaigns/${c.id}/advancement`, { mode }); }
+        catch (e) { if (e.status !== 409 || !confirm(e.message)) throw e; await api('PATCH', `/api/campaigns/${c.id}/advancement`, { mode, confirm: true }); }
+        await openWorld(w.id);
+      }) }, 'switch mode'), ' · ',
+      h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'player' }); prompt('Player invite code (single use):', r.code); }) }, 'invite player'), ' · ',
+      h('button', { class: 'link', onclick: () => run(async () => { const r = await api('POST', `/api/campaigns/${c.id}/invites`, { role: 'spectator' }); prompt('Spectator invite code (single use):', r.code); }) }, 'invite spectator')))),
+    h('form', { onsubmit: onSubmit(async (f) => { await api('POST', `/api/worlds/${w.id}/campaigns`, f.advancement ? f : { name: f.name }); await openWorld(w.id); }) },
+      field('New campaign', h('input', { name: 'name', required: true })),
+      field('Advancement', h('select', { name: 'advancement' }, h('option', { value: '' }, `inherit (${w.settings.advancement})`), options(['milestone', 'xp']))),
+      h('button', {}, 'Create campaign')),
+  ];
+}
+
+function addPlaceForm(v) {
+  return h('form', { onsubmit: onSubmit(async (f) => {
+      if (!state.pick) throw new Error('Click the map to choose where the place goes.');
+      const loc = await api('POST', `/api/locations/${v.location.id}/children`, { ...f, ...state.pick });
+      state.pick = null; await go(v.location.id); return loc;
+    }) },
+    field('New place', h('input', { name: 'name', required: true })),
+    field('Type', h('input', { name: 'type', value: v.location.type === 'world' ? 'town' : 'building', size: 8 })),
+    field('Visible to', h('select', { name: 'visibility' }, options(['gm', 'party', 'public'], 'party'))),
+    h('button', {}, state.pick ? `Add at ${state.pick.x},${state.pick.y}` : 'Click map, then add'));
+}
+
+function pageEditor(v) {
+  return h('form', { onsubmit: onSubmit(async (f) => {
+      await api('PATCH', `/api/pages/${v.page.id}`, { body: f.body, gmNotes: f.gmNotes });
+      if (f.imageUrl !== v.map.imageUrl) await api('PATCH', `/api/maps/${v.map.id}`, { imageUrl: f.imageUrl });
+      if (f.name !== v.location.name) await api('PATCH', `/api/locations/${v.location.id}`, { name: f.name });
+      await go(v.location.id);
+    }) },
+    field('Name', h('input', { name: 'name', value: v.location.name, required: true })),
+    h('label', { style: 'width:100%' }, 'Player-facing lore', h('textarea', { name: 'body' }, v.page.body)),
+    h('label', { style: 'width:100%' }, 'GM-only notes', h('textarea', { name: 'gmNotes' }, v.page.gmNotes)),
+    h('label', { style: 'width:100%' }, 'Map image URL', h('input', { name: 'imageUrl', type: 'url', value: v.map.imageUrl })),
+    h('button', {}, 'Save'));
+}
+
+run(render);
+</script>
+</body>
+</html>
